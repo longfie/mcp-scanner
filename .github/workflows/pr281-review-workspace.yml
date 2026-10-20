@@ -8,32 +8,80 @@ permissions:
   contents: read
 
 jobs:
-  prepare:
+  validate:
     if: github.repository == 'longfie/mcp-scanner'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Snapshot the public branches for conflict resolution
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.12'
+      - name: Construct candidate from pinned public branches
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p /tmp/pr281-evidence
           git remote add upstream https://github.com/cisco-ai-defense/mcp-scanner.git
           git fetch --no-tags upstream main
-          test "$(git rev-parse refs/remotes/origin/fix/paginated-mcp-discovery)" = e1c55260a4079c6fd07a1075a41db6ac5a32606a
           test "$(git rev-parse refs/remotes/upstream/main)" = 10032f9886dfc6850c2ab673626b61d6e0340a34
-          mkdir -p /tmp/pr281-workspace
-          git bundle create /tmp/pr281-workspace/pr281.bundle refs/remotes/origin/fix/paginated-mcp-discovery refs/remotes/upstream/main
-          git log -1 --format='%H %s' refs/remotes/origin/fix/paginated-mcp-discovery | tee /tmp/pr281-workspace/heads.txt
-          git log -1 --format='%H %s' refs/remotes/upstream/main | tee -a /tmp/pr281-workspace/heads.txt
-          git diff --stat 07cb5b085597d46c1e5fb829991d3c9d44787497..refs/remotes/upstream/main
-          sha256sum /tmp/pr281-workspace/pr281.bundle
+          test "$(git rev-parse refs/remotes/origin/fix/paginated-mcp-discovery)" = e1c55260a4079c6fd07a1075a41db6ac5a32606a
+          git worktree add --detach /tmp/pr281-source e1c55260a4079c6fd07a1075a41db6ac5a32606a
+          python .github/review/build_candidate.py /tmp/pr281-source | tee /tmp/pr281-evidence/preparation.log
+      - name: Format and run focused regressions
+        working-directory: /tmp/pr281-source
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --locked --group dev
+          uv run --locked black mcpscanner/core/pagination.py tests/test_pagination.py tests/test_scanner_pagination.py tests/test_pagination_review.py tests/fixtures/stdio_paginated_server.py
+          uv run --locked python -m pytest tests/test_pagination.py tests/test_scanner_pagination.py tests/test_pagination_review.py -q --maxfail=10 2>&1 | tee /tmp/pr281-evidence/focused.log
+      - name: Complete Python compatibility matrix
+        working-directory: /tmp/pr281-source
+        shell: bash
+        run: |
+          set -euo pipefail
+          for version in 3.11 3.12 3.13; do
+            uv run --locked --python "$version" python -m pytest -q --maxfail=5 2>&1 | tee "/tmp/pr281-evidence/tests-$version.log"
+          done
+          uv run --locked python -m pytest tests/test_pagination.py tests/test_scanner_pagination.py tests/test_pagination_review.py --cov=mcpscanner.core.pagination --cov-branch --cov-report=term-missing -q 2>&1 | tee /tmp/pr281-evidence/coverage.log
+          uv build 2>&1 | tee /tmp/pr281-evidence/build.log
+          uv run --locked black --check mcpscanner/core/pagination.py tests/test_pagination.py tests/test_scanner_pagination.py tests/test_pagination_review.py tests/fixtures/stdio_paginated_server.py
+          git diff --exit-code 10032f9886dfc6850c2ab673626b61d6e0340a34 -- pyproject.toml uv.lock
+          git add docs/programmatic-usage.md mcpscanner/config/constants.py mcpscanner/core/pagination.py mcpscanner/core/scanner.py tests/test_pagination.py tests/test_scanner_pagination.py tests/test_pagination_review.py tests/fixtures/stdio_paginated_server.py
+          git diff --cached --check
+          git commit -m 'fix(scanner): resolve SDK 2 conflicts and address pagination review'
+          git show --no-patch --format=fuller HEAD | tee /tmp/pr281-evidence/commit.txt
+          git diff --stat 10032f9886dfc6850c2ab673626b61d6e0340a34 HEAD | tee /tmp/pr281-evidence/scope.txt
+          git bundle create /tmp/pr281-evidence/candidate.bundle HEAD
+      - name: Publish tested candidate only, without updating the live PR
+        working-directory: /tmp/pr281-source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(git ls-remote https://github.com/longfie/mcp-scanner.git refs/heads/fix/paginated-mcp-discovery | cut -f1)" = e1c55260a4079c6fd07a1075a41db6ac5a32606a
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth" push https://github.com/longfie/mcp-scanner.git HEAD:refs/heads/work/pr281-tested-candidate
+      - name: Collect source and diagnostics
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p /tmp/pr281-evidence
+          if test -d /tmp/pr281-source; then
+            git -C /tmp/pr281-source diff --binary 10032f9886dfc6850c2ab673626b61d6e0340a34 > /tmp/pr281-evidence/candidate.patch
+            tar -czf /tmp/pr281-evidence/reviewed-files.tar.gz -C /tmp/pr281-source docs/programmatic-usage.md mcpscanner/config/constants.py mcpscanner/core/pagination.py mcpscanner/core/scanner.py tests/test_pagination.py tests/test_scanner_pagination.py tests/test_pagination_review.py tests/fixtures/stdio_paginated_server.py || true
+          fi
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: pr281-review-workspace
-          path: /tmp/pr281-workspace/
+          name: pr281-validation-evidence
+          path: /tmp/pr281-evidence/
           retention-days: 3
           if-no-files-found: error
