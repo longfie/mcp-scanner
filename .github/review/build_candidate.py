@@ -115,6 +115,15 @@ replace_once("tests/test_scanner_pagination.py",
     "assert len(session.list_requests) == target_page",
     "assert len(session.list_requests) == target_page + 1")
 
+# Match the SDK result's explicit end-of-pagination field in existing test
+# doubles. Do not weaken the malformed-response check in production code.
+replace_once("tests/test_prompt_message_scanning.py",
+    "SimpleNamespace(prompts=", "SimpleNamespace(next_cursor=None, prompts=", count=7)
+replace_once("tests/test_resource_scanning.py",
+    "SimpleNamespace(resources=", "SimpleNamespace(next_cursor=None, resources=", count=10)
+replace_once("tests/test_scanner.py", "    class MockToolList:\n",
+    "    class MockToolList:\n        next_cursor = None\n", count=9)
+
 file = source / "docs/programmatic-usage.md"
 text = file.read_text()
 a = text.index("## Paginated Server Lists")
@@ -126,6 +135,8 @@ paths = [
     "mcpscanner/core/pagination.py", "mcpscanner/core/scanner.py",
     "tests/test_pagination.py", "tests/test_scanner_pagination.py",
     "tests/test_pagination_review.py", "tests/fixtures/stdio_paginated_server.py",
+    "tests/test_prompt_message_scanning.py", "tests/test_resource_scanning.py",
+    "tests/test_scanner.py",
 ]
 git("add", *paths)
 assert set(git("diff", "--cached", "--name-only", BASE).stdout.splitlines()) == set(paths)
