@@ -1,0 +1,39 @@
+name: PR 281 Review Workspace
+
+on:
+  push:
+    branches: [work/pr281-review-validation]
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    if: github.repository == 'longfie/mcp-scanner'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Snapshot the public branches for conflict resolution
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/cisco-ai-defense/mcp-scanner.git
+          git fetch --no-tags upstream main
+          test "$(git rev-parse refs/remotes/origin/fix/paginated-mcp-discovery)" = e1c55260a4079c6fd07a1075a41db6ac5a32606a
+          test "$(git rev-parse refs/remotes/upstream/main)" = 10032f9886dfc6850c2ab673626b61d6e0340a34
+          mkdir -p /tmp/pr281-workspace
+          git bundle create /tmp/pr281-workspace/pr281.bundle refs/remotes/origin/fix/paginated-mcp-discovery refs/remotes/upstream/main
+          git log -1 --format='%H %s' refs/remotes/origin/fix/paginated-mcp-discovery | tee /tmp/pr281-workspace/heads.txt
+          git log -1 --format='%H %s' refs/remotes/upstream/main | tee -a /tmp/pr281-workspace/heads.txt
+          git diff --stat 07cb5b085597d46c1e5fb829991d3c9d44787497..refs/remotes/upstream/main
+          sha256sum /tmp/pr281-workspace/pr281.bundle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr281-review-workspace
+          path: /tmp/pr281-workspace/
+          retention-days: 3
+          if-no-files-found: error
